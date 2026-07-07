@@ -1,0 +1,12 @@
+transformers>=4.25.1
+accelerate>=0.13.2
+datasets>=2.6.1,<3.0.0
+evaluate>=0.3.0
+pyext==0.5
+mosestokenizer==1.0.0
+huggingface_hub>=0.21.2,<0.25  # cap: hub 1.x rejects the hf:// URIs datasets<3.0 builds (dataset load -> AttributeError)
+fsspec>=2023.12.2
+requests>=2.28.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+aiofiles>=23.0

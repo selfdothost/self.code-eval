@@ -1,0 +1,18 @@
+# self.code-eval publish — builds the image on a push to the protected public-alpha
+# branch, via the reusable GHCR workflow that lives in self.ai.
+name: publish
+
+on:
+  push:
+    branches: [public-alpha]
+
+jobs:
+  image:
+    uses: selfdothost/self.ai/.github/workflows/publish-ghcr.yml@public-alpha
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image: self.code-eval
+      context: .
+      dockerfile: Dockerfile

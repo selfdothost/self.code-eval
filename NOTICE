@@ -1,0 +1,29 @@
+self.code-eval
+Copyright (C) 2026 selfdothost / the self.ai contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License version 3, as published by the Free
+Software Foundation. The full text is in LICENSE.
+
+--------------------------------------------------------------------------------
+Provenance & retained upstream notice
+--------------------------------------------------------------------------------
+
+self.code-eval is a fully vendored, renamed fork of the BigCode Evaluation
+Harness (https://github.com/bigcode-project/bigcode-evaluation-harness),
+originally licensed Apache-2.0. It was previously carried as self.bigcode-eval;
+the Python package was renamed bigcode_eval -> code_eval.
+
+Why fully vendored: self.ai licenses the combined work under GPLv3. Apache-2.0
+is one-way compatible with GPLv3, so the upstream code is included here under
+GPLv3 while its original Apache-2.0 license text and attribution are retained in
+LICENSE.bigcode-apache-2.0. A GPLv3 combined work cannot be contributed back to
+an Apache-2.0 upstream, so self.code-eval is a hard vendor: we do not track or
+push to the original project. self.code-eval is not affiliated with, endorsed
+by, or connected to the BigCode project.
+
+self.code-eval is the catch-all harness for code-focused evaluation tasks;
+more specific code-eval harnesses are forked from it.
+
+The original Apache-2.0 license text is preserved verbatim in
+LICENSE.bigcode-apache-2.0.

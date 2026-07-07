@@ -1,0 +1,45 @@
+# self.code-eval CI — yard-native image build.
+# kaniko on bigbuild -> container.home (same pattern as self.ai / self.chat).
+# CPU-only: the harness runs code benchmarks by calling each model's
+# OpenAI-compatible API. Builds the FastAPI control plane + the vendored
+# code-eval framework into one image (api/main.py on :8094).
+
+stages: [build, publish]
+
+include:
+  - project: 'selfshipyard/selfai/self.ai'
+    ref: main
+    file: '.gitlab/ci-templates/sync-public-alpha.yml'
+
+default:
+  tags: [bigbuild]
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE
+
+# --- publish: mirror main -> public-alpha (GitLab + GitHub), scheduled only -
+sync:public-alpha:
+  extends: .sync-public-alpha
+  variables:
+    MIRROR_EXCLUDE_PATHS: ""
+
+build:code-eval:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  timeout: 1h
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_JOB_TOKEN" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+  script:
+    - >
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile Dockerfile
+      --cache=true --cache-repo "$IMAGE/cache"
+      --destination "$IMAGE:$CI_COMMIT_SHORT_SHA"
+      --destination "$IMAGE:latest"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
