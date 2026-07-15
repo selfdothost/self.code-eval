@@ -265,9 +265,9 @@ TF_CPP_MIN_LOG_LEVEL=3 accelerate launch main.py \
 Tasks are named `multiple-<LANG>` where `<LANG>` is the language name, e.g. `multiple-py` for python.
 
 ```bash
-$ sudo make DOCKERFILE=Dockerfile-multiple all
+$ sudo make all
 ```
-This creates an image called `evaluation-harness-multiple`.
+This creates an image called `evaluation-harness` with every MultiPL-E language runtime already bundled in (the separate `Dockerfile-multiple` this used to require has been folded into the main `Dockerfile`).
 
 Suppose you generated text with the `bigcode/santacoder` model and saved it in `generations_py.json` with:
 ```bash

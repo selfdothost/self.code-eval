@@ -14,6 +14,14 @@ Harness (https://github.com/bigcode-project/bigcode-evaluation-harness),
 originally licensed Apache-2.0. It was previously carried as self.bigcode-eval;
 the Python package was renamed bigcode_eval -> code_eval.
 
+The fork point is pinned in our history at upstream commit
+`8fc5bae6479c4fbbb28c3f8b644f6a15b3f3b5bd` ("Update multiple.py", 2025-07-15),
+the last BigCode Evaluation Harness commit before self.ai-specific work began
+(`f0a5a97`, "built an api to wrap the testing harness"). No upstream release
+tag exists at that point; the commit hash is the precise reference. The full
+upstream git history up to that commit is preserved verbatim in this repo's
+history — nothing was squashed.
+
 Why fully vendored: self.ai licenses the combined work under GPLv3. Apache-2.0
 is one-way compatible with GPLv3, so the upstream code is included here under
 GPLv3 while its original Apache-2.0 license text and attribution are retained in

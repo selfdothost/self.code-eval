@@ -1,11 +1,8 @@
-# There are two dockerfiles: for all benchmarks, and for MultiPL-E
+# A separate Dockerfile-multiple used to exist for MultiPL-E; the single
+# Dockerfile now bundles every MultiPL-E language runtime directly, so
+# there's only one image to build.
 DOCKERFILE=Dockerfile
-
-ifeq ($(DOCKERFILE), Dockerfile)
-	IMAGE_NAME=evaluation-harness
-else
-	IMAGE_NAME=evaluation-harness-multiple
-endif
+IMAGE_NAME=evaluation-harness
 
 build:
 	docker build -f $(DOCKERFILE) -t $(IMAGE_NAME) .

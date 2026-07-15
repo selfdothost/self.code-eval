@@ -87,13 +87,10 @@ This will submit one job for each task.
 
 ### 3- Execution
 
-We execute and evaluate the solutions inside a docker container, you can either build the image or pull the one we provide:
+We execute and evaluate the solutions inside a docker container. Build the image (it bundles every MultiPL-E language runtime already):
 ```bash
-# to build it:
-# sudo make DOCKERFILE=Dockerfile-multiple all
-sudo docker pull ghcr.io/bigcode-project/evaluation-harness-multiple
-sudo docker tag ghcr.io/bigcode-project/evaluation-harness-multiple evaluation-harness-multiple
-````
+sudo make all
+```
 
 Then, you can run the evaluation on the generated code:
 ```bash
@@ -116,7 +113,7 @@ for lang in "${langs[@]}"; do
     metric_suffix=metrics_$task\_$model.json
     echo "Evaluation of $model on $task benchmark, data in $generations_path/$gen_suffix"
 
-    sudo docker run -v $(pwd)/$generations_path/$gen_suffix:/app/$gen_suffix:ro  -v $(pwd)/$metrics_path:/app/$metrics_path -it evaluation-harness-multiple python3 main.py \
+    sudo docker run -v $(pwd)/$generations_path/$gen_suffix:/app/$gen_suffix:ro  -v $(pwd)/$metrics_path:/app/$metrics_path -it evaluation-harness python3 main.py \
         --model $org/$model \
         --tasks $task \
         --load_generations_path /app/$gen_suffix \
