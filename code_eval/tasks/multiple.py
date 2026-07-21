@@ -19,7 +19,7 @@ import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
 
-from code_eval.base import Task
+from code_eval.base import Task, _hf_hub_token
 from code_eval.tasks.custom_metrics.multiple_metrics.evaluation import \
     evaluate_problem
 from code_eval.tasks.custom_metrics.multiple_metrics.single_experiment_pass_k import \
@@ -97,7 +97,8 @@ class GeneralMultiPLE(Task):
         self.dataset = load_dataset(
             GeneralMultiPLE.DATASET_PATH,
             self.DATASET_NAME,
-            revision=self.DATASET_REVISION)
+            revision=self.DATASET_REVISION,
+            token=_hf_hub_token())
         stop_words = self.dataset["test"][0]["stop_tokens"] + ["<file_sep>"]
         super().__init__(
             stop_words=stop_words,

@@ -59,6 +59,13 @@ def create_all_tasks():
 class GeneralDS1000(Task):
     DATASET_PATH = None
     DATASET_NAME = None
+    # DS-1000 never sets DATASET_PATH, so the base `load_dataset(path=None, ...)`
+    # call in `Task.__init__` always raises (deterministically, not just on a
+    # network hiccup) -- it fetches its own local data separately below via
+    # `_download_source`/`_download_dataset` and never uses `self.dataset`.
+    # This is the one genuinely local-only case allowed to swallow the load
+    # failure instead of re-raising it.
+    DATASET_LOAD_OPTIONAL = True
 
     def __init__(self, key, mode):
         super().__init__(

@@ -8,7 +8,8 @@ from pathlib import Path
 
 from . import (eval_cpp, eval_dlang, eval_java, eval_javascript, eval_julia,
                eval_lua, eval_php, eval_python, eval_r, eval_racket, eval_ruby,
-               eval_rust, eval_swift, eval_ts, eval_go, eval_pl, eval_sh, eval_scala, eval_cs)
+               eval_rust, eval_swift, eval_ts, eval_go, eval_pl, eval_sh, eval_scala, eval_cs,
+               eval_clj, eval_dart, eval_elixir, eval_hs, eval_ocaml)
 
 EVALUATORS = {
     "rb": (eval_ruby.eval_script, ".rb"),
@@ -40,6 +41,15 @@ EVALUATORS = {
     "pl": (eval_pl.eval_script, ".pl"),
     "sh": (eval_sh.eval_script, ".sh"),
     "scala": (eval_scala.eval_script, ".scala"),
+    "clj": (eval_clj.eval_script, ".clj"),
+    "clojure": (eval_clj.eval_script, ".clj"),
+    "dart": (eval_dart.eval_script, ".dart"),
+    "elixir": (eval_elixir.eval_script, ".exs"),
+    "exs": (eval_elixir.eval_script, ".exs"),
+    "hs": (eval_hs.eval_script, ".hs"),
+    "haskell": (eval_hs.eval_script, ".hs"),
+    "ml": (eval_ocaml.eval_script, ".ml"),
+    "ocaml": (eval_ocaml.eval_script, ".ml"),
 }
 
 

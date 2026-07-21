@@ -27,6 +27,37 @@ Once you have read this disclaimer and taken appropriate precautions, set the ar
 ################################################################################\
 """
 
+def _prompt_to_text(prompt_contents, args):
+    """Render whatever task.get_prompt() returned as flat text.
+
+    Most tasks return a plain string. Instruction-style tasks (instruct-humaneval,
+    instruct-humaneval-nocontext, instruct_wizard_humaneval) return a
+    {"instruction", "context"} dict instead. Mirror the exact flattening that
+    api_generation.py and code_eval/utils.py's TokenizedDataset already use to build
+    the actual request/generation text, so prompt-stripping and the "prompt" field
+    in the detail report reflect what the model actually saw, regardless of which
+    generation path (API or local) produced the completions.
+
+    Returns None for prompt shapes with no single meaningful flat-text form (e.g.
+    FIM {"prefix", "suffix"} infill prompts) — callers should treat that as "can't
+    determine, don't strip" rather than guessing.
+    """
+    if isinstance(prompt_contents, str):
+        return prompt_contents
+    if isinstance(prompt_contents, dict) and set(prompt_contents.keys()) == {"instruction", "context"}:
+        instruction = prompt_contents["instruction"]
+        context = prompt_contents["context"]
+        instruction_tokens = getattr(args, "instruction_tokens", None)
+        if instruction_tokens:
+            tokens = instruction_tokens.split(",")
+            user_token, end_token, assistant_token = tokens[0], tokens[1], tokens[2]
+        else:
+            user_token, end_token, assistant_token = "", "", "\n"
+        prefix = getattr(args, "prefix", "") or ""
+        return prefix + user_token + instruction + end_token + assistant_token + context
+    return None
+
+
 class Evaluator:
     def __init__(self, accelerator, model, tokenizer, args):
         self.accelerator = accelerator
@@ -130,15 +161,23 @@ class Evaluator:
                 for task_id in range(n_tasks):
                     dataset_idx = self.args.limit_start + task_id
                     doc = dataset[dataset_idx]
-                    prompt = task.get_prompt(doc)
+                    prompt_contents = task.get_prompt(doc)
+                    # Some tasks (e.g. instruct-humaneval family) return a
+                    # {"instruction", "context"} dict rather than a plain string.
+                    # Flatten it the same way the generation paths do before
+                    # comparing against/stripping from the raw generation.
+                    prompt = _prompt_to_text(prompt_contents, self.args)
                     task_results = details.get(task_id, [])
                     # Sort by completion_id
                     task_results.sort(key=lambda x: x[0])
                     samples = []
                     for completion_id, result_info in task_results:
                         gen = generations[task_id][completion_id] if completion_id < len(generations[task_id]) else ""
-                        # Strip the prompt to show only what the model generated
-                        completion = gen[len(prompt):] if gen.startswith(prompt) else gen
+                        # Strip the prompt to show only what the model generated.
+                        # If we couldn't derive a flat prompt string (e.g. FIM
+                        # infill prompts), leave the generation unstripped rather
+                        # than guess.
+                        completion = gen[len(prompt):] if prompt is not None and gen.startswith(prompt) else gen
                         samples.append({
                             "completion_id": completion_id,
                             "generation": gen,
@@ -158,7 +197,7 @@ class Evaluator:
 
                     entry = {
                         "task_id": _doc_get(doc, "task_id", f"task_{task_id}"),
-                        "prompt": prompt,
+                        "prompt": prompt if prompt is not None else prompt_contents,
                         "entry_point": _doc_get(doc, "entry_point"),
                         "canonical_solution": _doc_get(doc, "canonical_solution"),
                         "reference_test": references[task_id],

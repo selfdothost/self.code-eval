@@ -7,7 +7,7 @@ attempts by the same participant.
 Web page: https://huggingface.co/datasets/wellesley-easel/StudentEval
 """
 
-from code_eval.base import Task
+from code_eval.base import Task, _hf_hub_token
 from datasets import load_dataset
 from multiprocessing import cpu_count
 from concurrent.futures import ThreadPoolExecutor
@@ -92,7 +92,7 @@ class StudentEval(Task):
     def __init__(self):
         self.stop_words = ["\ndef", "\nclass", "\nif", "\nprint"]
         self.requires_execution = True
-        self.dataset = load_dataset(path=self.DATASET_PATH)
+        self.dataset = load_dataset(path=self.DATASET_PATH, token=_hf_hub_token())
         # NOTE(Arjun Guha): Avoiding .filter so that we don't get a datasets
         # cache item on disk.
         self.dataset = [

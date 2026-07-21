@@ -1,0 +1,5 @@
+# Keep the mirrored upstream git history (and local cruft) out of the image —
+# COPY . /app was baking .git in wholesale.
+.git
+**/__pycache__
+*.pyc

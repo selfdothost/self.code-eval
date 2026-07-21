@@ -172,6 +172,19 @@ class JobCreate(BaseModel):
     save_references: bool = Field(default=True)
     do_sample: bool = Field(default=True)
     seed: int = Field(default=0)
+    prompt: Optional[str] = Field(
+        default=None,
+        description=(
+            "Prompt template for HumanEvalPack task variants "
+            "(humanevalsynthesize-*/humanevalfixtests-*/humanevalfixdocs-*/"
+            "humanevalexplainsynthesize-*). Ignored by tasks that don't accept a "
+            "--prompt argument. Defaults to 'instruct' if unset. Other supported "
+            "values include: continue (HumanEvalSynthesize only), octocoder, "
+            "octogeex, starchat, starcodercommit, instructcodet5p, wizardcoder, "
+            "codellama, codellama-70b, deepseek, tulu, gritlm, zephyr, yi, "
+            "starchat2, codeqwen, codegemma, aurora-m."
+        ),
+    )
 
     class Config:
         json_schema_extra = {
@@ -372,7 +385,10 @@ def create_job(req: JobCreate) -> Job:
     """Start a new evaluation job."""
     # Validate string inputs — reject null bytes and shell metacharacters
     # (subprocess uses list args so no shell injection, but defense-in-depth)
-    for field_name, value in [("tasks", req.tasks), ("model", req.model), ("api_endpoint", req.api_endpoint)]:
+    _string_fields = [("tasks", req.tasks), ("model", req.model), ("api_endpoint", req.api_endpoint)]
+    if req.prompt is not None:
+        _string_fields.append(("prompt", req.prompt))
+    for field_name, value in _string_fields:
         if "\x00" in value:
             raise HTTPException(status_code=400, detail=f"Invalid {field_name}: contains null bytes")
         if any(c in value for c in [";", "|", "&", "`", "$", "(", ")", "\n", "\r"]):
@@ -445,6 +461,8 @@ def create_job(req: JobCreate) -> Job:
         cmd.append("--save_references")
     if req.do_sample:
         cmd.append("--do_sample")
+    if req.prompt is not None:
+        cmd.extend(["--prompt", req.prompt])
 
     # Live events file for streaming prompt/response pairs
     live_events_file = str(LOGS_DIR / f"{job_id}.events.jsonl")

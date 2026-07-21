@@ -9,9 +9,8 @@ Homepage: https://github.com/hendrycks/apps
 
 import json
 
-from evaluate import load
-
 from code_eval.base import Task
+from code_eval.tasks.custom_metrics.apps_metric import evaluate_generations, get_results
 
 _CITATION = """
 @article{hendrycksapps2021,
@@ -114,25 +113,38 @@ class GeneralAPPS(Task):
             list of lists containing generations
         :param references: list(str)
             list of str containing refrences (not needed for APPS Task)
+
+        Scoring used to go through `evaluate.load("codeparrot/apps_metric")`,
+        which fetches that metric's `_compute()` implementation live from the
+        HF Hub at runtime and was called with a `results_details=True` kwarg
+        it doesn't accept -- and never has, at any point in its git history.
+        See code_eval/tasks/custom_metrics/apps_metric/NOTICE for the full
+        investigation (self.code-eval issue #2, item 6). We now vendor the
+        metric's actual compute logic (custom_metrics/apps_metric/) and call
+        it directly, building `details` from the real raw per-problem,
+        per-generation results instead of the `results_details`/`"results"`
+        shape that was never actually returned upstream.
         """
-        code_metric = load("codeparrot/apps_metric")
-        results = code_metric.compute(
-            predictions=generations, k_list=self.k_list, level=self.DATASET_NAME,
-            results_details=True,
+        raw_results = evaluate_generations(
+            generations, level=self.DATASET_NAME, debug=False
         )
-        # Build details from per-problem results if available
-        if "results" in results:
-            details = {}
-            for task_id, task_results in enumerate(results["results"]):
-                task_details = []
-                if isinstance(task_results, list):
-                    for comp_id, r in enumerate(task_results):
-                        passed = r == True or (isinstance(r, list) and all(x == True for x in r))
-                        result_str = "passed" if passed else str(r)
-                        task_details.append((comp_id, {"passed": passed, "result": result_str}))
-                else:
-                    passed = task_results == True
-                    task_details.append((0, {"passed": passed, "result": "passed" if passed else str(task_results)}))
-                details[task_id] = task_details
-            results["details"] = details
+        results = get_results(raw_results, count_errors=True, k_list=self.k_list)
+
+        # Build details from the real per-problem, per-generation results.
+        # raw_results is {problem_index: [[test_case_result, ...], ...]} --
+        # one inner list per generation, one entry per test case; entries
+        # are True/False, or the sentinel ints -2 (compile error) / -1
+        # (runtime error). A generation "passed" iff every test case it ran
+        # against came back True.
+        details = {}
+        for task_id, generation_results in raw_results.items():
+            task_details = []
+            for comp_id, test_case_results in enumerate(generation_results):
+                passed = len(test_case_results) > 0 and all(
+                    r is True for r in test_case_results
+                )
+                result_str = "passed" if passed else str(test_case_results)
+                task_details.append((comp_id, {"passed": passed, "result": result_str}))
+            details[task_id] = task_details
+        results["details"] = details
         return results

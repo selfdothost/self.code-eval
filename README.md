@@ -46,13 +46,20 @@ self.code-eval ships two layers:
 
 Built and published via GitLab CI (kaniko, yard-native — no local Docker
 workflow) from the single `Dockerfile` at repo root. That image bundles every
-MultiPL-E language runtime (Node/TypeScript, Java, Scala, Go, Ruby, PHP, Lua +
-`luaunit`, R) directly, so it covers everything the standard benchmarks and
-MultiPL-E both need in one build.
+MultiPL-E language runtime directly — all 23 registered `multiple-*` tasks
+are runnable, from Node/TypeScript through Clojure, Dart, Elixir, Haskell,
+and OCaml — so it covers everything the standard benchmarks and MultiPL-E
+both need in one build.
 
 `Dockerfile-multiple` (a thin wrapper that pulled
 `ghcr.io/nuprl/multipl-e-evaluation` as its base) predated that consolidation
 and was never built by CI — removed.
+
+Gated datasets on the Hub (e.g. `studenteval`) need an HF token to download.
+The image doesn't bake one in — set `HF_TOKEN` (or the legacy
+`HUGGING_FACE_HUB_TOKEN`) as a runtime env var at deploy time via the yard's
+secrets mechanism (ESO/OpenBao), not in the `Dockerfile`. Ungated benchmarks
+need no token and are unaffected either way.
 
 ## Features
 

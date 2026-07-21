@@ -40,6 +40,19 @@ RUN mkdir -p /usr/local/share/lua/5.3 && \
     curl -fsSL --retry 5 -o /usr/local/share/lua/5.3/luaunit.lua \
       https://raw.githubusercontent.com/bluebird75/luaunit/LUAUNIT_V3_4/luaunit.lua
 
+# Perl (multiple-pl): eval_pl.py runs `perl` directly (present via base-image
+# deps), but every one of the 161 MultiPL-E perl reference tests does
+# `use Test::Deep;` + `eq_deeply(...)`. That module isn't Perl core and wasn't
+# installed, so every single generation — correct or not — died at `BEGIN`
+# with "Can't locate Test/Deep.pm in @INC" (exit code 2), which is why
+# multiple-pl scored a flat 0.0 regardless of generation quality. Confirmed
+# live: re-scoring an existing 161-generation set (job d9d7f137,
+# THUDM_GLM-4-32B-0414-Q4_K_M) through eval_pl.py went from pass@1=0.0 to
+# 0.484 after installing this one package.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libtest-deep-perl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Mono C# (multiple-cs) — uses csc + mono
 RUN apt-get update && apt-get install -y --no-install-recommends \
     mono-mcs mono-runtime \
@@ -95,6 +108,62 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 ENV PATH="/opt/swift-${SWIFT_VERSION}-RELEASE-ubuntu22.04/usr/bin:${PATH}"
 
+# OCaml + Haskell (multiple-ml, multiple-hs): eval_ocaml.py runs `ocaml`,
+# eval_hs.py runs `runghc`. Both ship in the jammy archive, and the generated
+# tests use only stdlib asserts — no extra harness libs this time (unlike the
+# lua/perl/java sagas above).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ocaml ocaml-interp ghc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Elixir (multiple-elixir): eval_elixir.py runs `elixir file.exs`; generated
+# tests use ExUnit assert macros (stdlib — the "Assertion with == failed"
+# classifier string comes from ExUnit). Jammy has no apt elixir new enough,
+# so use hex.pm's prebuilt OTP + matching Elixir zip, pinned — same source
+# upstream MultiPL-E's evaluation image uses. libodbc1/libssl3/libsctp1 are
+# the OTP build's documented runtime deps.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libodbc1 libssl3 libsctp1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /opt/erlang && cd /opt/erlang && \
+    curl -fsSL --retry 5 -o erlang.tar.gz https://builds.hex.pm/builds/otp/ubuntu-22.04/OTP-27.0.tar.gz && \
+    tar xzf erlang.tar.gz --strip-components=1 && rm erlang.tar.gz && \
+    ./Install -minimal /opt/erlang && \
+    mkdir -p /opt/elixir && cd /opt/elixir && \
+    curl -fsSL --retry 5 -o elixir.zip https://builds.hex.pm/builds/elixir/v1.17.2-otp-27.zip && \
+    unzip -q elixir.zip && rm elixir.zip
+ENV PATH="/opt/erlang/bin:/opt/elixir/bin:${PATH}"
+ENV LANG=C.UTF-8
+
+# Clojure (multiple-clj): eval_clj.py runs `clojure -M file.clj`; success is
+# clojure.test's "0 failures, 0 errors." summary (stdlib). Rides the JDK
+# installed above. `clojure -P` + one throwaway run pre-warm the CLI's dep
+# and user-level classpath caches — the first-ever `clojure` invocation
+# computes a classpath and would otherwise burn most of the 15s per-problem
+# timeout on problem #1 (same failure shape as julia's cold `using Test`).
+RUN curl -fsSL --retry 5 -o /tmp/clj-install.sh \
+      https://github.com/clojure/brew-install/releases/download/1.11.3.1463/linux-install.sh && \
+    bash /tmp/clj-install.sh --prefix /opt/clojure && rm /tmp/clj-install.sh
+ENV PATH="/opt/clojure/bin:${PATH}"
+RUN clojure -P && \
+    echo '(println :warm)' > /tmp/warm.clj && clojure -M /tmp/warm.clj && rm /tmp/warm.clj
+
+# Dart (multiple-dart): eval_dart.py gates on `dart analyze`, then runs
+# `dart`. Official apt repo (amd64 — matches the bigbuild runners). The repo
+# tracks Dart stable (unpinned — named duct tape; pin if scores ever need to
+# be replayed bit-exact). Warm-run once so problem #1 doesn't pay first-run
+# analyzer/VM setup cost.
+RUN curl -fsSL --retry 5 https://dl-ssl.google.com/linux/linux_signing_key.pub \
+      | gpg --dearmor -o /usr/share/keyrings/dart.gpg && \
+    echo 'deb [signed-by=/usr/share/keyrings/dart.gpg arch=amd64] https://storage.googleapis.com/download.dartlang.org/linux/debian stable main' \
+      > /etc/apt/sources.list.d/dart_stable.list && \
+    apt-get update && apt-get install -y --no-install-recommends dart && \
+    rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/lib/dart/bin:${PATH}"
+RUN printf 'void main() {}\n' > /tmp/warm.dart && \
+    (dart analyze --no-fatal-warnings /tmp/warm.dart || true) && \
+    dart /tmp/warm.dart && rm /tmp/warm.dart
+
 COPY . /app
 
 WORKDIR /app
@@ -112,6 +181,13 @@ RUN pip3 install torch --extra-index-url https://download.pytorch.org/whl/cpu &&
 RUN cp /app/parser_shim.py "$(python3 -c 'import site; print(site.getsitepackages()[0])')/parser.py"
 
 RUN mkdir -p /workspace/results /workspace/logs
+
+# No HF_TOKEN is set here on purpose -- never bake a Hub token into the
+# image. Gated datasets (e.g. studenteval) need one; set HF_TOKEN (or the
+# legacy HUGGING_FACE_HUB_TOKEN) as a runtime env var at deploy time via the
+# yard's secrets mechanism. api/main.py already forwards the container's
+# environment to the eval subprocess (`env = os.environ.copy()`), so nothing
+# else needs to change for it to reach code_eval/base.py's load_dataset call.
 
 EXPOSE 8094
 

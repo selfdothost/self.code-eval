@@ -1,0 +1,69 @@
+Vendored: codeparrot/apps_metric
+================================
+
+This package vendors the compute logic behind the "codeparrot/apps_metric"
+HF Hub metric (https://huggingface.co/spaces/codeparrot/apps_metric),
+originally licensed Apache-2.0, per the same fully-vendored/hard-fork
+posture documented in this repo's top-level NOTICE (self.ai licenses the
+combined work under GPLv3; Apache-2.0 is one-way compatible).
+
+Files and the exact upstream revision each was pulled from (space repo
+`codeparrot/apps_metric`, main branch history at the time of vendoring,
+2026-07-18):
+
+  - utils.py         <- utils.py         @ 2a1d3d698c4e91ce7c6636000f6988be9abcac23
+                                            ("hide debugging comment", 2022-08-09)
+  - testing_util.py  <- testing_util.py  @ d4ef3dc20ee6eb4bf5362cde8fc9a45bc2bad549
+                                            ("remove print", 2022-08-28)
+
+Both files were byte-identical to the metric's live HEAD (commit
+9877be0aa476d466e0cf9e252191b3614a13b7cb, "Update the metadata (#4)",
+2023-06-06 — a README-only change) at the time of vendoring; they have not
+changed since 2022. Fetched directly via the HF Hub raw-file endpoint
+(`https://huggingface.co/spaces/codeparrot/apps_metric/raw/<rev>/<file>`),
+diffed against HEAD to confirm byte-for-byte match.
+
+We did NOT vendor the upstream `apps_metric.py` wrapper (the
+`evaluate.EvaluationModule` subclass HF's `evaluate.load()` dynamically
+downloads and instantiates). That wrapper's only job is adapting
+`compute_metrics()` to the `evaluate` library's plugin loader protocol; we
+call `evaluate_generations()` / `get_results()` (from utils.py) directly
+from code_eval/tasks/apps.py, so the wrapper is unnecessary. This is also
+the entire point of vendoring: `evaluate.load("codeparrot/apps_metric")`
+fetches `apps_metric.py` *live* from the Hub at runtime, so a change on the
+Hub (or the Hub being unreachable) can silently change or break scoring.
+
+Why this was vendored (self.code-eval issue #2, item 6):
+`code_eval/tasks/apps.py::GeneralAPPS.process_results` used to call
+`code_metric.compute(..., results_details=True)`, expecting the metric to
+accept a `results_details` kwarg and return a `results` key with
+per-problem/per-generation pass data to build `details` from.
+
+That kwarg was never part of `apps_metric.py::_compute()` at ANY point in
+its git history — verified across every commit that touched the file, from
+the initial "Create new file" commit through the current HEAD
+(`_compute` signatures seen, oldest to newest:
+`(self, generations, k_list=[1,10,100], count_errors=True, level=["all"])` ->
+`(self, generations, k_list=[1,10,100], count_errors=True, level="all")` ->
+`(self, predictions, k_list=[1,10,100], count_errors=True, level="all", debug=False)`,
+the last of these being HEAD since 2022-07-19). `compute_metrics()` /
+`_compute()` only ever returns `{"avg_accuracy", "strict_accuracy",
+"pass_at_k"}` — there has never been a `"results"` key either, so the old
+`if "results" in results:` details-building block in apps.py was already
+dead code regardless of the `results_details` TypeError.
+
+`results_details=True` was introduced entirely on the self.ai side in
+commit 8dbb2dc ("feat: add self.ai API integration and extend evaluation
+tasks") without ever having existed upstream — i.e. it was never
+"compatible with an older version," it was never compatible with any
+version. There is no "revert to an old compatible revision" fix available;
+the call site's expectations were wrong from the start.
+
+The fix (this vendoring + the apps.py change that accompanies it) drops
+`results_details` entirely and instead calls the vendored
+`evaluate_generations()` directly to get the real raw per-problem,
+per-generation test-case results, then builds `details` from that actual
+data shape in apps.py — achieving the same intent (per-task pass/fail
+detail alongside the aggregate metrics) the original `results_details=True`
+call was reaching for, using the metric's real interface instead of an
+imagined one.

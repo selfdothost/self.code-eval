@@ -14,6 +14,7 @@ import contextlib
 import itertools
 import platform
 import tempfile
+import warnings
 import signal
 import json
 import time
@@ -336,6 +337,21 @@ def estimate_beyond_at_k(beyonds, k):
     return sum([sum(b[:k]) / k for b in beyonds]) / len(beyonds)
 
 
+def _instance_identifier(instance, index):
+    """Best-effort human-readable id for an instance, falling back to its position."""
+    for key in ("task_id", "name", "slug"):
+        try:
+            value = instance.get(key)
+        except AttributeError:
+            try:
+                value = instance[key]
+            except (KeyError, IndexError, TypeError):
+                value = None
+        if value not in (None, ""):
+            return value
+    return f"index_{index}"
+
+
 def compute_beyond_eval(generations_list, reference_list, timeout=10):
     sandbox = Sandbox()
 
@@ -352,7 +368,9 @@ def compute_beyond_eval(generations_list, reference_list, timeout=10):
         "Hard": {"failed@load": 0, "failed@eval": 0, "failed@cases": 0, "failed@timeout": 0, "failed@error": 0, "passed": 0},
     }
 
-    for generations, instance in tqdm(zip(generations_list, reference_list), total=len(generations_list), desc='compute_beyond_eval'):
+    skipped_instances = list()
+
+    for instance_index, (generations, instance) in enumerate(tqdm(zip(generations_list, reference_list), total=len(generations_list), desc='compute_beyond_eval')):
         # Construct runtime distribution from sample solutions
         runtimes = list()
         for index, solution in tqdm(enumerate(instance['solutions']), desc="Construct runtime distribution from sample solutions"):
@@ -369,6 +387,22 @@ def compute_beyond_eval(generations_list, reference_list, timeout=10):
 
             if result['result'] == "passed":
                 runtimes += [result['runtime']]
+
+        if not runtimes:
+            # None of this instance's reference solutions passed in the sandbox, so
+            # there's no runtime range to normalize generated solutions against.
+            # Skip the instance entirely (both pass@k and beyond@k contributions)
+            # rather than crashing on min()/max() of an empty sequence or fabricating
+            # a fallback range.
+            instance_id = _instance_identifier(instance, instance_index)
+            num_reference_solutions = len(instance['solutions'])
+            warnings.warn(
+                f"compute_beyond_eval: skipping instance {instance_id!r} (position {instance_index}) - "
+                f"none of its {num_reference_solutions} reference solution(s) returned 'passed' in the "
+                f"sandbox, so no runtime range is available to score generations against."
+            )
+            skipped_instances.append({"index": instance_index, "task_id": instance_id})
+            continue
 
         # Calculate Range
         runtimes = sorted(runtimes)
@@ -422,14 +456,21 @@ def compute_beyond_eval(generations_list, reference_list, timeout=10):
         correct = np.array(scores[difficulty]['correct_c'])
         beyond = scores[difficulty]['beyond_c']
 
+        # If every instance of this difficulty was skipped (no reference solutions
+        # passed), `total`/`beyond` are empty - there's nothing to average, so leave
+        # this difficulty's pass@k/beyond@k out of the results instead of dividing by
+        # zero (estimate_beyond_at_k) or averaging an empty array (pass@k).
+        has_data = total.size > 0
+
         pass_at_k = {f"{difficulty}_pass@{k}": estimate_pass_at_k(total, correct, k).mean(
-        ) for k in [1, 3, 5, 10, 15, 20, 30, 50, 100] if (total >= k).all()}
+        ) for k in [1, 3, 5, 10, 15, 20, 30, 50, 100] if has_data and (total >= k).all()}
         beyond_at_k = {f"{difficulty}_beyond@{k}": estimate_beyond_at_k(
-            beyond, k) for k in [1, 3, 5, 10, 15, 20, 30, 50, 100] if (total >= k).all()}
+            beyond, k) for k in [1, 3, 5, 10, 15, 20, 30, 50, 100] if has_data and (total >= k).all()}
 
         results.update(pass_at_k)
         results.update(beyond_at_k)
 
     results.update(errors)
+    results["skipped_instances"] = skipped_instances
 
     return results

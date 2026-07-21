@@ -196,7 +196,7 @@ def parse_args():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="prompt",
+        default="instruct",
         help="Prompt type to use for generation in HumanEvalPack tasks",
     )
     parser.add_argument(
