@@ -36,7 +36,6 @@ def timeout_handler(signum, frame):
     print("alarm went off")
     #return
     raise TimeoutException
-signal.signal(signal.SIGALRM, timeout_handler)
 timeout = 4  # seconds
 
 # used to capture stdout as a list
@@ -60,6 +59,14 @@ def run_test(sample, test=None, debug=False):
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
     """
+    # SIGALRM handler registration must happen here, not at module import:
+    # signal.signal() only works in the main thread, and this module gets
+    # imported through code_eval.tasks by the API's task discovery, which
+    # runs in a uvicorn worker thread. Import-time registration made that
+    # discovery raise ValueError -> /api/tasks returned an empty catalog.
+    # run_test only executes in the eval subprocess's main thread, where
+    # registration is safe.
+    signal.signal(signal.SIGALRM, timeout_handler)
     # Disable functionalities that can make destructive changes to the test.
     reliability_guard()
 

@@ -16,9 +16,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import aiofiles
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from auth import require_scope
 
 # ─── Constants ──────────────────────────────────────────────────────────
 
@@ -360,7 +362,7 @@ def _categorize_task(name: str) -> str:
 
 
 @app.get("/api/tasks")
-def list_tasks() -> List[TaskInfo]:
+def list_tasks(_auth=Depends(require_scope("tasks:read"))) -> List[TaskInfo]:
     """List all available benchmark tasks."""
     return [
         TaskInfo(name=name, category=_categorize_task(name))
@@ -369,7 +371,7 @@ def list_tasks() -> List[TaskInfo]:
 
 
 @app.get("/api/tasks/categories")
-def list_task_categories() -> Dict[str, List[str]]:
+def list_task_categories(_auth=Depends(require_scope("tasks:read"))) -> Dict[str, List[str]]:
     """List tasks grouped by category."""
     categories: Dict[str, List[str]] = {}
     for name in _get_all_tasks():
@@ -381,7 +383,7 @@ def list_task_categories() -> Dict[str, List[str]]:
 # ─── Jobs Endpoints ────────────────────────────────────────────────────
 
 @app.post("/api/jobs", status_code=201)
-def create_job(req: JobCreate) -> Job:
+def create_job(req: JobCreate, _auth=Depends(require_scope("jobs:create"))) -> Job:
     """Start a new evaluation job."""
     # Validate string inputs — reject null bytes and shell metacharacters
     # (subprocess uses list args so no shell injection, but defense-in-depth)
@@ -517,6 +519,7 @@ def create_job(req: JobCreate) -> Job:
 @app.get("/api/jobs")
 def list_jobs(
     status: Optional[JobStatus] = Query(None, description="Filter by status"),
+    _auth=Depends(require_scope("jobs:read")),
 ) -> List[Job]:
     """List all jobs, optionally filtered by status."""
     jobs = sorted(_jobs.values(), key=lambda j: j.created_at, reverse=True)
@@ -526,7 +529,7 @@ def list_jobs(
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str) -> Job:
+def get_job(job_id: str, _auth=Depends(require_scope("jobs:read"))) -> Job:
     """Get job details."""
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
@@ -537,7 +540,10 @@ def get_job(job_id: str) -> Job:
 
 @app.get("/api/jobs/{job_id}/logs")
 async def get_job_logs(
-    job_id: str, tail: int = Query(100, ge=1, le=10000), stream: bool = Query(False)
+    job_id: str,
+    tail: int = Query(100, ge=1, le=10000),
+    stream: bool = Query(False),
+    _auth=Depends(require_scope("jobs:read")),
 ):
     """Get job logs. Use stream=true for live tailing."""
     _validate_id(job_id, "job_id")
@@ -579,7 +585,7 @@ async def get_job_logs(
 
 
 @app.get("/api/jobs/{job_id}/live")
-async def get_job_live(job_id: str):
+async def get_job_live(job_id: str, _auth=Depends(require_scope("jobs:read"))):
     """Stream prompt/response pairs as SSE events during a running evaluation."""
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
@@ -628,7 +634,7 @@ async def get_job_live(job_id: str):
 
 
 @app.delete("/api/jobs/{job_id}")
-def cancel_job(job_id: str):
+def cancel_job(job_id: str, _auth=Depends(require_scope("jobs:write"))):
     """Cancel a running job."""
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
@@ -654,7 +660,7 @@ def cancel_job(job_id: str):
 
 
 @app.delete("/api/jobs/{job_id}/purge")
-def purge_job(job_id: str):
+def purge_job(job_id: str, _auth=Depends(require_scope("jobs:write"))):
     """Delete a job and all its associated files (logs, results, generations)."""
     _validate_id(job_id, "job_id")
     job = _jobs.get(job_id)
@@ -698,7 +704,7 @@ def purge_job(job_id: str):
 # ─── Results Endpoints ──────────────────────────────────────────────────
 
 @app.get("/api/results")
-def list_results() -> List[Dict[str, Any]]:
+def list_results(_auth=Depends(require_scope("jobs:read"))) -> List[Dict[str, Any]]:
     """List all evaluation results (from completed jobs)."""
     results = []
     if not RESULTS_DIR.is_dir():
@@ -732,7 +738,7 @@ def list_results() -> List[Dict[str, Any]]:
 
 
 @app.get("/api/results/{result_id}")
-def get_result(result_id: str) -> Dict[str, Any]:
+def get_result(result_id: str, _auth=Depends(require_scope("jobs:read"))) -> Dict[str, Any]:
     """Get full evaluation results for a specific run."""
     _validate_id(result_id, "result_id")
     # Support both "abc123-results" and "abc123" as result_id
@@ -751,7 +757,7 @@ def get_result(result_id: str) -> Dict[str, Any]:
 
 
 @app.get("/api/results/{result_id}/details")
-def get_result_details(result_id: str) -> List[Dict[str, Any]]:
+def get_result_details(result_id: str, _auth=Depends(require_scope("jobs:read"))) -> List[Dict[str, Any]]:
     """Get per-problem details for a specific evaluation run."""
     _validate_id(result_id, "result_id")
     base_id = result_id.replace("-results", "")
@@ -774,7 +780,7 @@ def get_result_details(result_id: str) -> List[Dict[str, Any]]:
 
 
 @app.get("/api/results/{result_id}/generations")
-def get_result_generations(result_id: str):
+def get_result_generations(result_id: str, _auth=Depends(require_scope("jobs:read"))):
     """Get the raw code generations for a specific evaluation run."""
     _validate_id(result_id, "result_id")
     base_id = result_id.replace("-results", "")

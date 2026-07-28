@@ -1,10 +1,19 @@
 # self.code-eval CI — yard-native image build.
-# kaniko on bigbuild -> container.home (same pattern as self.ai / self.chat).
+# buildkit-rootless on bigbuild -> container.home (gitlab-profile#60 /
+# self.infrastructure#143). NOT kaniko: kaniko's writable layer always lands on
+# the node's containerd root and can't be redirected, OOM-ing tight-disk nodes;
+# buildkit's state is a flag (`--root`) pointed at the /builds mount, and it runs
+# rootless (uid 1000, SETUID/SETGID only) — strictly less privileged than kaniko.
 # CPU-only: the harness runs code benchmarks by calling each model's
 # OpenAI-compatible API. Builds the FastAPI control plane + the vendored
 # code-eval framework into one image (api/main.py on :8094).
+#
+# Two-job split (selfinfra/zlib reference): build:code-eval is the MR gate —
+# it builds with NO --output (buildkit's equivalent of kaniko --no-push), so it
+# validates the image on every MR without pushing (the old single job pushed
+# :latest straight from MRs). publish:code-eval builds + pushes on main only.
 
-stages: [build, publish]
+stages: [test, build, publish]
 
 include:
   - project: 'selfshipyard/selfai/self.ai'
@@ -16,6 +25,31 @@ default:
 
 variables:
   IMAGE: $CI_REGISTRY_IMAGE
+  BUILDKIT_IMAGE: "moby/buildkit:v0.31.2-rootless"   # pinned, not master
+  # Bursty CI jobs: SMALL requests so a job schedules even on a busy node, HIGH
+  # limits so it can burst when it actually runs. These jobs sit idle until
+  # triggered, need real CPU/RAM only briefly, and don't all run at once — so
+  # right-sizing the request (not the limit) is what lets k8s bin-pack them.
+  # Requires the runner to permit resource overwrites (self.infrastructure#173).
+  KUBERNETES_CPU_REQUEST: "250m"
+  KUBERNETES_CPU_LIMIT: "8"
+  KUBERNETES_MEMORY_REQUEST: "1Gi"
+  KUBERNETES_MEMORY_LIMIT: "16Gi"
+
+# Registry auth + buildkit state dir, both OUTSIDE the build context. Scratch is
+# a SIBLING of $CI_PROJECT_DIR (never inside it): the context IS $CI_PROJECT_DIR,
+# so state kept inside would feed the build its own state, and the CI_JOB_TOKEN
+# credential must never sit where a `COPY . .` could bake it into the image
+# (gitlab-profile#60 trap 3). --root points build bytes at the /builds mount,
+# off the node's containerd root (the whole point of #143).
+.buildkit-before: &buildkit-before
+  - export BK_SCRATCH="${CI_BUILDS_DIR:-/builds}/.buildkit"
+  - mkdir -p "$BK_SCRATCH" 2>/dev/null || export BK_SCRATCH="$(dirname "$CI_PROJECT_DIR")/.buildkit"
+  - mkdir -p "$BK_SCRATCH/state" "$BK_SCRATCH/docker"
+  - export DOCKER_CONFIG="$BK_SCRATCH/docker"
+  - echo "{\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_JOB_TOKEN" | base64 | tr -d '\n')\"}}}" > "$DOCKER_CONFIG/config.json"
+  - chmod 600 "$DOCKER_CONFIG/config.json"
+  - export BUILDKITD_FLAGS="--oci-worker-no-process-sandbox --root $BK_SCRATCH/state"
 
 # --- publish: mirror main -> public-alpha (GitLab + GitHub), scheduled only -
 sync:public-alpha:
@@ -23,23 +57,59 @@ sync:public-alpha:
   variables:
     MIRROR_EXCLUDE_PATHS: ""
 
-build:code-eval:
-  stage: build
-  image:
-    name: gcr.io/kaniko-project/executor:debug
-    entrypoint: [""]
-  timeout: 1h
+# self.ai#25: service-ticket auth layer on the control API (api/auth.py).
+# Targeted job, not the full harness suite (test_prompts.py etc. need the
+# heavy transformers/torch/datasets install this control-plane-only job
+# deliberately skips) — same install footprint as self.llamolotl's own
+# test:llamolotl job, plus PyJWT for the ticket module.
+test:code-eval-api:
+  stage: test
+  image: python:3.11-slim
+  timeout: 15m
   before_script:
-    - mkdir -p /kaniko/.docker
-    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_JOB_TOKEN" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - pip install --no-cache-dir fastapi "uvicorn[standard]" aiofiles httpx pytest PyJWT
   script:
-    - >
-      /kaniko/executor
-      --context "$CI_PROJECT_DIR"
-      --dockerfile Dockerfile
-      --cache=true --cache-repo "$IMAGE/cache"
-      --destination "$IMAGE:$CI_COMMIT_SHORT_SHA"
-      --destination "$IMAGE:latest"
+    - pytest tests/api -q
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+
+# --- build: MR gate — full image, NO push (omit --output = kaniko --no-push) ---
+build:code-eval:
+  stage: build
+  image: { name: "$BUILDKIT_IMAGE", entrypoint: [""] }
+  timeout: 1h
+  before_script: *buildkit-before
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - >
+      buildctl-daemonless.sh build
+      --frontend dockerfile.v0
+      --local context="$CI_PROJECT_DIR"
+      --local dockerfile="$CI_PROJECT_DIR"
+      --import-cache "type=registry,ref=${IMAGE}/cache"
+      --export-cache "type=registry,ref=${IMAGE}/cache,mode=max"
+
+# --- publish: build + push :sha and :latest (main only) ---
+publish:code-eval:
+  stage: publish
+  image: { name: "$BUILDKIT_IMAGE", entrypoint: [""] }
+  timeout: 1h
+  before_script: *buildkit-before
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    # --output value is CSV, so the tag list MUST be inner-quoted or the second
+    # tag becomes a stray key → `error: invalid value ...` (gitlab-profile#60
+    # trap 1). Assemble into a var so the nested quoting survives YAML→shell.
+    - export TAGS="${IMAGE}:${CI_COMMIT_SHORT_SHA},${IMAGE}:latest"
+    - 'export OUT="type=image,\"name=${TAGS}\",push=true"'
+    - >
+      buildctl-daemonless.sh build
+      --frontend dockerfile.v0
+      --local context="$CI_PROJECT_DIR"
+      --local dockerfile="$CI_PROJECT_DIR"
+      --import-cache "type=registry,ref=${IMAGE}/cache"
+      --export-cache "type=registry,ref=${IMAGE}/cache,mode=max"
+      --output "$OUT"

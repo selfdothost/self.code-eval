@@ -11,7 +11,6 @@ import json
 import os
 import re
 import tempfile
-from multiprocessing import cpu_count
 from pathlib import Path
 from time import time
 
@@ -20,6 +19,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 from code_eval.base import Task, _hf_hub_token
+from code_eval.cgroup_utils import get_max_workers
 from code_eval.tasks.custom_metrics.multiple_metrics.evaluation import \
     evaluate_problem
 from code_eval.tasks.custom_metrics.multiple_metrics.single_experiment_pass_k import \
@@ -174,7 +174,7 @@ class GeneralMultiPLE(Task):
         )
 
         # execute the problems to evaluate them
-        max_workers = cpu_count() - 1 if cpu_count() > 1 else 1
+        max_workers = get_max_workers()
         for file in tqdm(list_files):
             evaluate_problem(temp_dir, file, max_workers)
 

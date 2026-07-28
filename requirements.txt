@@ -10,3 +10,4 @@ requests>=2.28.0
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 aiofiles>=23.0
+PyJWT>=2.8.0  # service-ticket auth (api/auth.py, self.ai#25)
