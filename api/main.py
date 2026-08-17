@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Union
 
 import aiofiles
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -92,17 +92,66 @@ def _sanitize_log_line(line: str) -> str:
 
 # ─── Task Discovery ────────────────────────────────────────────────────
 
-def _discover_tasks() -> List[str]:
-    """Import the task registry and return all available task names."""
+#: Where admin-registered MultiPL-E language tokens are persisted. Shared with
+#: code_eval/tasks/multiple.py, which reads the same path at import time.
+CUSTOM_LANGUAGES_FILE = Path(
+    os.environ.get("CUSTOM_LANGUAGES_FILE", str(WORKSPACE / "custom_languages.json"))
+)
+
+
+def _ensure_app_on_path() -> None:
+    import sys
+    if str(APP_DIR) not in sys.path:
+        sys.path.insert(0, str(APP_DIR))
+
+
+def _read_custom_languages() -> List[str]:
+    """Registered language tokens. Never raises — a broken file degrades to none."""
     try:
-        import sys
-        if str(APP_DIR) not in sys.path:
-            sys.path.insert(0, str(APP_DIR))
+        if not CUSTOM_LANGUAGES_FILE.is_file():
+            return []
+        data = json.loads(CUSTOM_LANGUAGES_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Warning: could not read {CUSTOM_LANGUAGES_FILE}: {e}")
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(t).strip().lower() for t in data if str(t).strip()]
+
+
+def _write_custom_languages(tokens: List[str]) -> None:
+    CUSTOM_LANGUAGES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CUSTOM_LANGUAGES_FILE.write_text(json.dumps(sorted(set(tokens)), indent=2), encoding="utf-8")
+
+
+def _discover_tasks() -> List[str]:
+    """All available task names, including runtime-registered MultiPL-E languages.
+
+    `ALL_TASKS` is built when `code_eval.tasks` is imported, and this process is
+    long-lived, so a language registered after boot would not appear here even
+    though a job -- a fresh `python main.py` subprocess -- would run it fine.
+    The registered tokens are therefore unioned in explicitly.
+
+    This mirrors `multiple.create_all_tasks()`'s own naming (`multiple-{lang}`)
+    rather than re-importing the registry, because reloading a module whose
+    classes are already bound elsewhere is a worse trade than restating one
+    format string.
+    """
+    try:
+        _ensure_app_on_path()
         from code_eval.tasks import ALL_TASKS
-        return list(ALL_TASKS)
+        names = list(ALL_TASKS)
     except Exception as e:
         print(f"Warning: could not discover tasks: {e}")
         return []
+
+    known = set(names)
+    for token in _read_custom_languages():
+        name = f"multiple-{token}"
+        if name not in known:
+            names.append(name)
+            known.add(name)
+    return sorted(names)
 
 
 _ALL_TASKS: List[str] = []
@@ -114,6 +163,16 @@ def _get_all_tasks() -> List[str]:
     if not _ALL_TASKS:
         _ALL_TASKS = _discover_tasks()
     return _ALL_TASKS
+
+
+def _invalidate_task_cache() -> None:
+    """Drop the memoised task list so the next read re-scans.
+
+    Without this a registered language would stay invisible until the pod
+    restarted, which is the same silent no-op self.language-eval#2 fixed.
+    """
+    global _ALL_TASKS
+    _ALL_TASKS = []
 
 
 # ─── Enums and Models ───────────────────────────────────────────────────
@@ -248,11 +307,24 @@ def _ensure_dirs():
 
 
 def _load_jobs():
+    """Restore jobs from disk, redacting credentials that predate #11.
+
+    Jobs written before that fix carry a raw ``api_key`` in their config, and
+    loading them unchanged would keep serving it from ``GET /api/jobs/{id}``
+    forever. Redacting on load means the first restart after this ships cleans
+    the state file — `_save_jobs()` then writes back the redacted form — without
+    a migration step anyone has to remember to run.
+    """
     global _jobs
+    _ensure_app_on_path()
+    from code_eval.secrets import redact_config
+
     if JOBS_STATE_FILE.exists():
         data = json.loads(JOBS_STATE_FILE.read_text())
         for job_id, job_data in data.items():
             try:
+                if isinstance(job_data.get("config"), dict):
+                    job_data["config"] = redact_config(job_data["config"])
                 job_data["created_at"] = datetime.fromisoformat(job_data["created_at"])
                 if job_data.get("started_at"):
                     job_data["started_at"] = datetime.fromisoformat(job_data["started_at"])
@@ -327,6 +399,11 @@ def _discover_details_file(job: Job):
 async def startup_event():
     _ensure_dirs()
     _load_jobs()
+    # #11: rewrite the state file immediately so the redaction applied on load
+    # reaches DISK, not just memory. Without this the raw keys in pre-fix jobs
+    # would sit in .jobs.json until some unrelated job happened to trigger a
+    # save — which could be never on an idle deployment.
+    _save_jobs()
     asyncio.create_task(_poll_jobs())
 
 
@@ -378,6 +455,214 @@ def list_task_categories(_auth=Depends(require_scope("tasks:read"))) -> Dict[str
         cat = _categorize_task(name)
         categories.setdefault(cat, []).append(name)
     return categories
+
+
+# ─── MultiPL-E Language Registration (self.code-eval#6) ────────────────
+#
+# Adding a MultiPL-E language is a PARAMETER change, not a code path: the family
+# is generated (`multiple-{lang}` from a token, scored against the HF dataset
+# config `humaneval-{lang}`), and Piston already owns execution. So this
+# endpoint takes a token, not a program.
+#
+# A token is only accepted if it passes all THREE checks, because each answers a
+# different question and any one of them failing means a task that registers and
+# then scores nothing:
+#
+#   1. an `eval_*.py` executor exists  -- without it the harness cannot score the
+#      language at all; `require_executor` raises rather than recording a 0.
+#   2. HARNESS_TOKEN_TO_INVOCABLE maps it -- without it no Piston request can be
+#      addressed.
+#   3. a LIVE Piston runtime resolves  -- per-deployment, answered by
+#      `GET /api/v2/runtimes`, never assumed from the table.
+#
+# Checking at ADD time is the point. All three were already enforced at run
+# time, where the failure surfaces mid-benchmark as an unrunnable task.
+
+_LANG_TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9_+-]{0,31}$")
+
+
+class LanguageCreate(BaseModel):
+    language: str = Field(..., description="MultiPL-E language token, e.g. 'zig'")
+
+
+#: MultiPL-E's dataset. `GeneralMultiPLE.__init__` reads config
+#: `humaneval-{language}` from it, so a token with no matching config produces a
+#: task that registers and then fails at dataset load.
+MULTIPLE_DATASET = os.environ.get("MULTIPLE_DATASET", "nuprl/MultiPL-E")
+HF_DATASETS_SERVER = os.environ.get("HF_DATASETS_SERVER", "https://datasets-server.huggingface.co")
+
+#: Process-lifetime memo — the config list is static per dataset revision.
+_MULTIPLE_CONFIGS: Optional[FrozenSet[str]] = None
+
+
+def _multiple_dataset_languages(*, force_refresh: bool = False) -> FrozenSet[str]:
+    """Language tokens MultiPL-E actually ships a `humaneval-*` config for.
+
+    Raises on failure rather than returning an empty set: "HuggingFace is
+    unreachable" and "this dataset has no configs" must not look alike, or an
+    outage would refuse every language for the wrong stated reason.
+    """
+    global _MULTIPLE_CONFIGS
+    if _MULTIPLE_CONFIGS is not None and not force_refresh:
+        return _MULTIPLE_CONFIGS
+
+    import requests
+
+    resp = requests.get(
+        f"{HF_DATASETS_SERVER}/splits",
+        params={"dataset": MULTIPLE_DATASET},
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"HuggingFace returned HTTP {resp.status_code} for {MULTIPLE_DATASET}")
+    configs = {str(sp.get("config", "")) for sp in (resp.json().get("splits") or [])}
+    langs = frozenset(c[len("humaneval-"):] for c in configs if c.startswith("humaneval-"))
+    if not langs:
+        raise RuntimeError(f"{MULTIPLE_DATASET} reported no humaneval-* configs")
+    _MULTIPLE_CONFIGS = langs
+    return langs
+
+
+def _language_report(token: str) -> Dict[str, Any]:
+    """The three-way check for one token, as data rather than an exception."""
+    report: Dict[str, Any] = {"language": token, "executor": False, "dataset": False,
+                              "invocable": None, "runtime": None, "runnable": False,
+                              "detail": None}
+    try:
+        _ensure_app_on_path()
+        from code_eval.piston.errors import UnknownLanguageError
+        from code_eval.piston.languages import resolve_language
+        from code_eval.piston.multiple_seam import executor_backed_tokens
+        from code_eval.piston.runtimes import get_runtimes
+    except Exception as e:
+        report["detail"] = f"Piston support is not importable in this image: {e}"
+        return report
+
+    report["executor"] = token in executor_backed_tokens()
+    if not report["executor"]:
+        report["detail"] = (
+            f"No eval_*.py executor for '{token}' in multiple_metrics/ — the harness "
+            "cannot score this language, so a task would record no result."
+        )
+        return report
+
+    # self.code-eval#7: execution capability is not the whole story. `python`
+    # passed all three execution checks and registered, but MultiPL-E has no
+    # humaneval-python config (it translates *from* Python), so the task would
+    # have failed at dataset load — the exact "registers then scores nothing"
+    # outcome these checks exist to prevent.
+    try:
+        dataset_langs = _multiple_dataset_languages()
+    except Exception as e:
+        report["detail"] = (
+            f"Could not confirm '{token}' has a {MULTIPLE_DATASET} dataset config: {e}. "
+            "Refusing rather than guessing — this is a HuggingFace reachability problem, "
+            "not a problem with the language."
+        )
+        return report
+
+    report["dataset"] = token in dataset_langs
+    if not report["dataset"]:
+        report["detail"] = (
+            f"{MULTIPLE_DATASET} has no 'humaneval-{token}' config, so multiple-{token} "
+            "would fail at dataset load even though the harness could execute it."
+        )
+        return report
+
+    try:
+        runtimes = get_runtimes()
+    except Exception as e:
+        report["detail"] = f"Could not read live Piston runtimes: {e}"
+        return report
+
+    try:
+        invocable, version = resolve_language(token, runtimes)
+    except UnknownLanguageError as e:
+        report["detail"] = str(e)
+        return report
+
+    report["invocable"] = invocable
+    report["runtime"] = version
+    report["runnable"] = True
+    return report
+
+
+def _builtin_languages() -> Optional[List[str]]:
+    """The languages MultiPL-E ships, or None if the registry is not importable.
+
+    None is a distinct answer from []: callers that need to know a token is NOT
+    a built-in must refuse rather than proceed on an empty list, or a registry
+    that failed to import would let a built-in be registered as custom and
+    shadow itself.
+    """
+    try:
+        _ensure_app_on_path()
+        from code_eval.tasks.multiple import BUILTIN_LANGUAGES
+        return list(BUILTIN_LANGUAGES)
+    except Exception as e:
+        print(f"Warning: could not read BUILTIN_LANGUAGES: {e}")
+        return None
+
+
+@app.get("/api/languages")
+def list_languages(_auth=Depends(require_scope("tasks:read"))) -> Dict[str, Any]:
+    """Built-in and registered MultiPL-E languages."""
+    return {"builtin": _builtin_languages() or [], "custom": _read_custom_languages()}
+
+
+@app.get("/api/languages/{token}/check")
+def check_language(token: str, _auth=Depends(require_scope("tasks:read"))) -> Dict[str, Any]:
+    """Run the three-way check without registering. Reviewable before adding."""
+    token = token.strip().lower()
+    if not _LANG_TOKEN_RE.match(token):
+        raise HTTPException(status_code=400, detail="Invalid language token")
+    return _language_report(token)
+
+
+@app.post("/api/languages", status_code=201)
+def create_language(req: LanguageCreate, _auth=Depends(require_scope("tasks:write"))) -> Dict[str, Any]:
+    token = req.language.strip().lower()
+    if not _LANG_TOKEN_RE.match(token):
+        raise HTTPException(
+            status_code=400,
+            detail="language must be lowercase alphanumerics plus '_', '-', '+', starting with a letter or digit",
+        )
+
+    builtin = _builtin_languages()
+    if builtin is None:
+        # Fail closed: without the built-in set we cannot tell whether this
+        # token would shadow one, and registering a shadow is not recoverable
+        # by inspection later.
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot read the built-in language list right now; registration refused.",
+        )
+    if token in builtin:
+        raise HTTPException(status_code=409, detail=f"'{token}' is already a built-in MultiPL-E language")
+
+    report = _language_report(token)
+    if not report["runnable"]:
+        # 422: the request is well-formed, the environment cannot honour it.
+        raise HTTPException(status_code=422, detail=report)
+
+    existing = _read_custom_languages()
+    if token not in existing:
+        _write_custom_languages(existing + [token])
+    _invalidate_task_cache()
+    return {**report, "task": f"multiple-{token}"}
+
+
+@app.delete("/api/languages/{token}")
+def delete_language(token: str, _auth=Depends(require_scope("tasks:write"))) -> Dict[str, str]:
+    token = token.strip().lower()
+    if not _LANG_TOKEN_RE.match(token):
+        raise HTTPException(status_code=400, detail="Invalid language token")
+    existing = _read_custom_languages()
+    if token not in existing:
+        raise HTTPException(status_code=404, detail=f"'{token}' is not a registered language")
+    _write_custom_languages([t for t in existing if t != token])
+    _invalidate_task_cache()
+    return {"deleted": token}
 
 
 # ─── Jobs Endpoints ────────────────────────────────────────────────────
@@ -451,8 +736,10 @@ def create_job(req: JobCreate, _auth=Depends(require_scope("jobs:create"))) -> J
         "--save_details_path", details_file_base,
     ]
 
-    if req.api_key:
-        cmd.extend(["--api_key", req.api_key])
+    # #11: the key goes in the environment, NOT argv. In argv it is readable by
+    # anything that can see /proc for the life of the job; the env of another
+    # process is not world-readable in the same way. Set further down, next to
+    # the other subprocess env.
     if req.limit is not None:
         cmd.extend(["--limit", str(req.limit)])
     if req.allow_code_execution:
@@ -480,6 +767,9 @@ def create_job(req: JobCreate, _auth=Depends(require_scope("jobs:create"))) -> J
     env["PYTHONUNBUFFERED"] = "1"
     env["TOKENIZERS_PARALLELISM"] = "false"
     env["BIGCODE_LIVE_EVENTS_PATH"] = live_events_file
+    if req.api_key:
+        # #11: main.py reads this when --api_key is absent from argv.
+        env["CODE_EVAL_API_KEY"] = req.api_key
 
     try:
         proc = subprocess.Popen(
@@ -493,7 +783,14 @@ def create_job(req: JobCreate, _auth=Depends(require_scope("jobs:create"))) -> J
         log_fh.close()
         raise HTTPException(status_code=500, detail=f"Failed to start evaluation: {e}")
 
-    config = req.model_dump()
+    # #11: the stored config is the one that reaches .jobs.json, GET
+    # /api/jobs/{id}, and the 201 below. Redact BEFORE constructing the Job so
+    # there is no window in which a Job object holds the raw key — the running
+    # subprocess already has it via the environment and does not need it here.
+    _ensure_app_on_path()
+    from code_eval.secrets import redact_config
+
+    config = redact_config(req.model_dump())
 
     job = Job(
         job_id=job_id,

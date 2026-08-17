@@ -71,6 +71,12 @@ class Evaluator:
         # code evaluation permission
         self.allow_code_execution = args.allow_code_execution
 
+        # Per-task generation delivery accounting, populated only on the API
+        # path (#10). Local generation cannot fail this way — there is no
+        # request to lose — so a locally generated task reports nothing rather
+        # than a misleading zero-failure record.
+        self._generation_health = {}
+
     def generate_text(self, task_name, intermediate_generations=None):
         task = tasks.get_task(task_name, self.args)
         dataset = task.get_dataset()
@@ -98,8 +104,12 @@ class Evaluator:
         curr_sample_idx = len(curr_generations)
 
         if getattr(self.args, "api_endpoint", None):
-            from code_eval.api_generation import api_parallel_generations
+            from code_eval.api_generation import GenerationHealth, api_parallel_generations
 
+            # Recorded per task so the score can say whether the infrastructure
+            # actually delivered the generations it was scored on (#10).
+            health = GenerationHealth()
+            self._generation_health[task_name] = health
             generations = api_parallel_generations(
                 task,
                 dataset,
@@ -110,6 +120,7 @@ class Evaluator:
                 save_every_k_tasks=self.args.save_every_k_tasks,
                 intermediate_generations=curr_generations,
                 intermediate_save_generations_path=intermediate_save_generations_path,
+                health=health,
             )
         else:
             generations = parallel_generations(
@@ -151,6 +162,15 @@ class Evaluator:
                 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
             print("Evaluating generations...")
             results = task.process_results(generations, references)
+
+            # #10: say whether the infrastructure delivered what was scored. A
+            # score alone cannot distinguish "the model failed" from "the model
+            # was never reached" — both arrive here as empty generations that
+            # score as failures. Absent on the local path, where there is no
+            # request to lose.
+            health = self._generation_health.get(task_name)
+            if health is not None:
+                results["generation"] = health.as_dict()
 
             # Save detailed per-problem report if requested
             details = results.pop("details", None)

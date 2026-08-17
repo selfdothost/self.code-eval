@@ -33,6 +33,15 @@ def check_correctness(check_program, timeout, task_id, completion_id):
     :param completion_id: an optional completion ID so we can match
         the results later even if execution finishes asynchronously.
     """
+    # Opt-in Piston routing (python-seam kit R1 / T-015). Imported lazily and
+    # checked first, so with ENABLE_PISTON_EXECUTION unset this function behaves
+    # exactly as it did before the seam existed.
+    from code_eval.piston.python_seam import (check_correctness_piston,
+                                              should_route_to_piston)
+
+    if should_route_to_piston():
+        return check_correctness_piston(check_program, timeout, task_id, completion_id)
+
     manager = multiprocessing.Manager()
     result = manager.list()
 

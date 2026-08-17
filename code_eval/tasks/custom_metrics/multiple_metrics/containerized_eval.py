@@ -54,6 +54,24 @@ EVALUATORS = {
 
 
 def eval_string_script(language, program):
+    # Opt-in Piston routing (multiple-seam kit R1 / T-011). Imported lazily and
+    # checked first so that with ENABLE_PISTON_EXECUTION unset this function is
+    # byte-identical to the local path below — the HTTP layer is never touched.
+    from code_eval.piston.multiple_seam import (eval_string_script_piston,
+                                                should_route_to_piston)
+
+    if should_route_to_piston():
+        return eval_string_script_piston(language, program)
+
+    return _eval_string_script_local(language, program)
+
+
+def _eval_string_script_local(language, program):
+    """The original in-container path: per-language eval_*.py -> safe_subprocess.
+
+    Unchanged from before the Piston seam existed; this is what runs whenever
+    ENABLE_PISTON_EXECUTION is off.
+    """
     if language in EVALUATORS:
         (eval_script, file_ext) = EVALUATORS[language]
     else:

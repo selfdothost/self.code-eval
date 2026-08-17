@@ -220,7 +220,12 @@ def parse_args():
         "--api_key",
         type=str,
         default=None,
-        help="API key for the endpoint (sent as Bearer token).",
+        help=(
+            "API key for the endpoint (sent as Bearer token). PREFER the "
+            "CODE_EVAL_API_KEY environment variable: a key passed here is "
+            "visible in this process's argv to anything that can read /proc "
+            "(#11). Kept for direct CLI use; the job API uses the env var."
+        ),
     )
     parser.add_argument(
         "--save_details_path",
@@ -249,6 +254,14 @@ def get_gpus_max_memory(max_memory, num_gpus):
 
 def main():
     args = parse_args()
+
+    # #11: take the key from the environment when argv did not carry one, so
+    # the job API can hand it over without it appearing in `ps`. An explicit
+    # --api_key still wins — a caller who typed it means it — but the API path
+    # no longer needs to.
+    if not getattr(args, "api_key", None):
+        args.api_key = os.environ.get("CODE_EVAL_API_KEY") or None
+
     transformers.logging.set_verbosity_error()
     datasets.logging.set_verbosity_error()
 
@@ -422,8 +435,12 @@ def main():
                     task, intermediate_generations=intermediate_generations
                 )
 
-    # Save all args to config
-    results["config"] = vars(args)
+    # Save all args to config, with credentials fingerprinted rather than
+    # written out (#11). This one dict is both the results artifact AND what
+    # gets printed to the job log, so redacting here closes both at once.
+    from code_eval.secrets import redact_config
+
+    results["config"] = redact_config(vars(args))
     if not args.generation_only:
         dumped = json.dumps(results, indent=2)
         if accelerator.is_main_process:

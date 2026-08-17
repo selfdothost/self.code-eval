@@ -57,17 +57,92 @@ sync:public-alpha:
   variables:
     MIRROR_EXCLUDE_PATHS: ""
 
+# --- test: the Piston client + seam suite -----------------------------------
+# Deliberately NOT the whole tests/ directory. The piston modules depend only on
+# `requests` + stdlib, so this runs on the light `yard` runner in a slim image
+# in seconds, with no torch/transformers/datasets install and no GPU node. The
+# rest of tests/ needs the full harness runtime and belongs in a follow-up job
+# that runs inside the built image — not wired yet, so don't read a green
+# pipeline here as "all tests pass".
+#
+# Not allow_failure: these gate the execution path that decides whether
+# model-generated code runs sandboxed or in-container. A red suite should stop
+# the pipeline.
+test:piston:
+  stage: test
+  tags: [yard]
+  image: python:3.11-slim
+  timeout: 15m
+  variables:
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  before_script:
+    - pip install --no-cache-dir pytest requests
+  script:
+    # `python -m pytest`, not `pytest` — the -m form puts the repo root on
+    # sys.path, which is what makes `import code_eval` resolve (tests/ has no
+    # __init__.py, so bare `pytest` would only add tests/ itself).
+    - python -m pytest tests/test_piston_*.py -q
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - code_eval/piston/**/*
+        - code_eval/tasks/custom_metrics/**/*
+        - tests/test_piston_*.py
+        - .gitlab-ci.yml
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  # The gitlab-runner pod intermittently loses registry/DNS egress, which
+  # surfaces here as a pip ENETUNREACH rather than a real test failure.
+  retry:
+    max: 2
+    when: [runner_system_failure, stuck_or_timeout_failure, script_failure]
+
 # self.ai#25: service-ticket auth layer on the control API (api/auth.py).
 # Targeted job, not the full harness suite (test_prompts.py etc. need the
 # heavy transformers/torch/datasets install this control-plane-only job
 # deliberately skips) — same install footprint as self.llamolotl's own
 # test:llamolotl job, plus PyJWT for the ticket module.
-test:code-eval-api:
+# Generation delivery accounting (#10). Its own job because it fits neither
+# neighbour: test:piston globs tests/test_piston_*.py and test:code-eval-api
+# runs tests/api only, so a tests/test_generation_health.py would have run
+# NOWHERE — which is how tests/test_evaluator_details.py already sits unrun.
+# Light deps on purpose: the module under test imports only requests + tqdm,
+# and every HTTP call in the suite is stubbed.
+test:generation-health:
   stage: test
+  tags: [yard]
   image: python:3.11-slim
   timeout: 15m
   before_script:
-    - pip install --no-cache-dir fastapi "uvicorn[standard]" aiofiles httpx pytest PyJWT
+    - pip install --no-cache-dir pytest requests tqdm
+  script:
+    - python -m pytest tests/test_generation_health.py -q
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  retry:
+    max: 2
+    when: [runner_system_failure, stuck_or_timeout_failure]
+
+test:code-eval-api:
+  stage: test
+  # `yard`, not the inherited `bigbuild` (#9). This installs seven pip packages
+  # into a slim image and runs a suite that takes 0.43s — it has no business on
+  # the single heavy-build runner, which is `concurrent = 1` and shared across
+  # the whole selfai group. Observed 2026-08-03: two publish pipelines sat
+  # `pending` here for over two hours behind self.llamolotl's llama-server build
+  # and then self.curator, while nidavellir idled at 2% CPU. Capacity was never
+  # the constraint; the one slot was. Because stages run test -> build ->
+  # publish, inheriting bigbuild made every pipeline take that slot TWICE, once
+  # for this. test:piston below already gets this right.
+  tags: [yard]
+  image: python:3.11-slim
+  timeout: 15m
+  before_script:
+    # `requests` is in requirements.txt and so is already in the runtime image
+    # (the piston client imports it) — it is listed here only because this job
+    # deliberately installs a trimmed set rather than requirements.txt, and
+    # api/main.py's MultiPL-E dataset check uses it.
+    - pip install --no-cache-dir fastapi "uvicorn[standard]" aiofiles httpx pytest PyJWT requests
   script:
     - pytest tests/api -q
   rules:

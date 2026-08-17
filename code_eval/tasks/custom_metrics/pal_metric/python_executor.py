@@ -24,6 +24,16 @@ def run_program(program, timeout, task_id, completion_id, answer_symbol=None):
         if not specified, the result are fetched from the stdout of the execution
 
     """
+    # Opt-in Piston routing (python-seam kit R1 / T-015). Lazy + checked first,
+    # so with ENABLE_PISTON_EXECUTION unset this is the original in-process path.
+    from code_eval.piston.python_seam import (run_program_piston,
+                                              should_route_to_piston)
+
+    if should_route_to_piston():
+        return run_program_piston(
+            program, timeout, task_id, completion_id, answer_symbol
+        )
+
     manager = multiprocessing.Manager()
     result = manager.list()
 

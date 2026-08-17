@@ -38,7 +38,9 @@ _CITATION = """
 }
 """
 
-LANGUAGES = [
+# The languages MultiPL-E ships translations for. Kept as its own constant so
+# the admin-added set below can never quietly drop one.
+BUILTIN_LANGUAGES = [
     "sh",
     "clj",
     "cpp",
@@ -63,6 +65,47 @@ LANGUAGES = [
     "swift",
     "ts",
 ]
+
+# Admin-registered language tokens (self.code-eval#6). Read at IMPORT time, on
+# purpose: a job runs as a fresh `python main.py --tasks ...` subprocess, so a
+# language added while the control API is up is picked up by the next job with
+# no restart and no --include_path equivalent. The long-lived API process is the
+# one that needs explicit cache invalidation, and it does that in api/main.py.
+#
+# A token only reaches this file after the control API has checked it three
+# ways -- an eval_*.py executor exists, HARNESS_TOKEN_TO_INVOCABLE maps it, and
+# a live Piston runtime resolves -- so nothing here is a guess. Reading it is
+# deliberately forgiving though: a missing or malformed file degrades to the
+# built-ins rather than breaking every task in the harness.
+CUSTOM_LANGUAGES_FILE = Path(
+    os.environ.get("CUSTOM_LANGUAGES_FILE", "/workspace/custom_languages.json")
+)
+
+
+def load_custom_languages(path=None):
+    """Language tokens registered at runtime. Never raises."""
+    target = Path(path) if path is not None else CUSTOM_LANGUAGES_FILE
+    try:
+        if not target.is_file():
+            return []
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - see docstring: must not break imports
+        print(f"Warning: could not read custom languages from {target}: {exc}")
+        return []
+    if not isinstance(data, list):
+        print(f"Warning: custom languages file {target} is not a JSON list; ignoring")
+        return []
+    return [str(t).strip().lower() for t in data if str(t).strip()]
+
+
+def build_languages(path=None):
+    """Built-ins plus any registered token not already among them."""
+    extras = [t for t in load_custom_languages(path) if t not in BUILTIN_LANGUAGES]
+    # dict.fromkeys preserves order while de-duplicating a file with repeats.
+    return BUILTIN_LANGUAGES + list(dict.fromkeys(extras))
+
+
+LANGUAGES = build_languages()
 
 
 def create_all_tasks():

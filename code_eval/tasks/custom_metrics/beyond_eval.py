@@ -275,8 +275,17 @@ class Sandbox(object):
     @staticmethod
     def run_sample(sample) -> Dict:
         """
-        Evaluates the functional correctness of a completion by running the test suite provided in the problem. 
+        Evaluates the functional correctness of a completion by running the test suite provided in the problem.
         """
+        # This engine has no Piston-routable shape (python-seam kit, T-015): it
+        # is not a one-shot program and needs lctk/sortedcontainers inside its
+        # namespace. With the flag on we raise rather than quietly execute
+        # untrusted code in-container while the operator believes otherwise.
+        from code_eval.piston.python_seam import (require_supported_engine,
+                                                  should_route_to_piston)
+
+        if should_route_to_piston():
+            require_supported_engine("beyond")
 
         with Manager() as manager:
             result = manager.list()
